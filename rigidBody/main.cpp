@@ -1,15 +1,21 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
 
 #include <learnopengl/shader_m.h>
 #include <learnopengl/camera.h>
 #include <learnopengl/model.h>
 
 #include <iostream>
+#include <vector>
+#include <algorithm>
+#include <cmath>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -19,11 +25,11 @@ int LeftButtonDown = 0;    // MOUSE STUFF
 int RightButtonDown = 0;
 
 // settings
-const unsigned int SCR_WIDTH = 768;
-const unsigned int SCR_HEIGHT = 768;
+const unsigned int SCR_WIDTH = 1200;
+const unsigned int SCR_HEIGHT = 1200;
 
 // camera
-Camera camera(glm::vec3(0.0f, 1.0f, 3.0f));
+Camera camera(glm::vec3(-1.0f, 1.0f, 6.0f));
 
 //Camera camera(glm::vec3(0.0f, 1.5f, 2.5f), glm::vec3(0.0f, 1.0f, 0.0f), -90.f, -15.0f);
 float lastX = SCR_WIDTH / 2.0f;
@@ -59,16 +65,29 @@ void processInput(GLFWwindow* window, int key, int scancode, int action, int mod
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 
 bool hasTextures = false;
-bool activateParent = false;
+bool activateParent = true;   
 bool activateSpotLight = false;
+
+// Rigid-body simulation hooks
+void InitRigidBodies();
+void ResetRigidBodies();
+void UpdateRigidBodies(float dt);
+void DrawRigidBodies();
+void DrawGroundPlane(glm::mat4 model);
 
 void myDisplay()
 {
 	glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-	glm::mat4 model = glm::mat4(1.0f); // initialize matrix to identity matrix first
+	glm::mat4 model = glm::mat4(1.0f);
+	DrawGroundPlane(model);
 
+	if (activateParent)
+	{
+		UpdateRigidBodies(deltaTime);
+	}
+	DrawRigidBodies();
 }
 
 int main()
@@ -78,14 +97,13 @@ int main()
 	initGL(&window);
 	setupShader();
 	createGLPrimitives();
+	InitRigidBodies();
 
 	glEnable(GL_DEPTH_TEST);
 	// render loop
-	// -----------
 
 	while (!glfwWindowShouldClose(window))
 	{
-		// per-frame time logic
 		float currentFrame = glfwGetTime();
 		deltaTime = currentFrame - lastFrame;
 		lastFrame = currentFrame;
@@ -94,8 +112,8 @@ int main()
 		lightingShader->setVec3("light.position", camera.Position);
 		lightingShader->setVec3("light.direction", camera.Front);
 		lightingShader->setVec3("viewPos", camera.Position);
-		lightingShader->setFloat("light.cutOff", glm::cos(glm::radians(11.0f)));
-		lightingShader->setFloat("light.outerCutOff", glm::cos(glm::radians(18.0f)));
+		lightingShader->setFloat("light.cutOff", glm::cos(glm::radians(30.0f)));
+		lightingShader->setFloat("light.outerCutOff", glm::cos(glm::radians(50.0f)));
 		if (activateSpotLight == true)
 		{
 			lightingShader->setFloat("activateSpotlight", true);
@@ -109,8 +127,8 @@ int main()
 
 		lightingShader->setVec3("light.diffuse", 1.0f, 1.0f, 1.0f);
 		lightingShader->setVec3("light.specular", 1.0f, 1.0f, 1.0f);
-		lightingShader->setFloat("light.constant", 0.1f);
-		lightingShader->setFloat("light.linear", 0.09f);
+		lightingShader->setFloat("light.constant", 0.01f);
+		lightingShader->setFloat("light.linear", 0.05f);
 		lightingShader->setFloat("light.quadratic", 0.0009f);
 
 		// material properties
@@ -134,7 +152,6 @@ int main()
 	destroyShader();
 
 	// glfw: terminate, clearing all previously allocated GLFW resources.
-	// ------------------------------------------------------------------
 	glfwDestroyWindow(window);
 	glfwTerminate();
 
@@ -144,7 +161,6 @@ int main()
 void initGL(GLFWwindow** window)
 {
 	// glfw: initialize and configure
-	// ------------------------------
 	glfwInit();
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -155,8 +171,7 @@ void initGL(GLFWwindow** window)
 #endif
 
 	// glfw window creation
-	// --------------------
-	* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "The Robot Arm", NULL, NULL);
+	* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "rigid body", NULL, NULL);
 	if (window == NULL)
 	{
 		std::cout << "Failed to create GLFW window" << std::endl;
@@ -171,7 +186,6 @@ void initGL(GLFWwindow** window)
 	glfwSetKeyCallback(*window, processInput);
 
 	// glad: load all OpenGL function pointers
-	// ---------------------------------------
 	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
 	{
 		std::cout << "Failed to initialize GLAD" << std::endl;
@@ -192,14 +206,16 @@ void destroyShader()
 	delete lightingShader;
 }
 
-// process all input: query GLFW whether relevant keys are pressed/released this frame and react accordingly
-// ---------------------------------------------------------------------------------------------------------
 void processInput(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
 
 	if (key == GLFW_KEY_SPACE && action == GLFW_PRESS) {
 		if (activateParent == false) activateParent = true;
 		else activateParent = false;
+	}
+	if (key == GLFW_KEY_R && action == GLFW_PRESS) {
+		ResetRigidBodies();
+		activateParent = true;
 	}
 	float cameraSpeed = 2.5f * deltaTime;
 	if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
@@ -214,18 +230,11 @@ void processInput(GLFWwindow* window, int key, int scancode, int action, int mod
 		glfwSetWindowShouldClose(window, true);
 }
 
-
-// glfw: whenever the window size changed (by OS or user resize) this callback function executes
-// ---------------------------------------------------------------------------------------------
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
-	// make sure the viewport matches the new window dimensions; note that width and 
-	// height will be significantly larger than specified on retina displays.
 	glViewport(0, 0, width, height);
 }
 
-// glfw: whenever the mouse moves, this callback is called
-// -------------------------------------------------------
 void mouse_callback(GLFWwindow* window, double xpos, double ypos)
 {
 	if (firstMouse)
@@ -236,7 +245,7 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos)
 	}
 
 	float xoffset = (float)(xpos - lastX) / SCR_WIDTH;
-	float yoffset = (float)(lastY - ypos) / SCR_HEIGHT; // reversed since y-coordinates go from bottom to top
+	float yoffset = (float)(lastY - ypos) / SCR_HEIGHT; 
 
 	lastX = (float)xpos;
 	lastY = (float)ypos;
@@ -305,9 +314,9 @@ public:
 		glGenBuffers(1, &ebo);
 	}
 	~Primitive() {
-		if (!ebo) glDeleteBuffers(1, &ebo);
-		if (!vbo) glDeleteBuffers(1, &vbo);
-		if (!VAO) glDeleteVertexArrays(1, &VAO);
+		if (ebo) glDeleteBuffers(1, &ebo);
+		if (vbo) glDeleteBuffers(1, &vbo);
+		if (VAO) glDeleteVertexArrays(1, &VAO);
 	}
 	void Draw() {
 		glBindVertexArray(VAO);
@@ -325,6 +334,16 @@ protected:
 class Cylinder : public Primitive {
 public:
 	Cylinder(float bottomRadius = 0.5f, float topRadius = 0.5f, int NumSegs = 16);
+};
+
+class Box : public Primitive {
+public:
+	Box();
+	void Draw() {
+		glBindVertexArray(VAO);
+		glDrawElements(GL_TRIANGLES, IndexCount, GL_UNSIGNED_INT, 0);
+		glBindVertexArray(0);
+	}
 };
 
 class Sphere : public Primitive {
@@ -350,6 +369,7 @@ Sphere* unitSphere;
 Plane* groundPlane;
 Cylinder* unitCylinder;
 Cylinder* unitCone;
+Box* unitBox;
 
 void createGLPrimitives()
 {
@@ -357,6 +377,7 @@ void createGLPrimitives()
 	groundPlane = new Plane();
 	unitCylinder = new Cylinder();
 	unitCone = new Cylinder(0.5, 0);
+	unitBox = new Box();
 
 }
 void destroyGLPrimitives()
@@ -365,6 +386,7 @@ void destroyGLPrimitives()
 	delete groundPlane;
 	delete unitCylinder;
 	delete unitCone;
+	delete unitBox;
 
 	delete ourObjectModel;
 }
@@ -374,6 +396,7 @@ void DrawGroundPlane(glm::mat4 model)
 	lightingShader->use();
 	lightingShader->setMat4("model", model);
 	lightingShader->setVec3("ObjColor", glm::vec3(0.8f, 0.8f, 0.8f));
+	lightingShader->setInt("hasTextures", true);
 	groundPlane->Draw();
 
 }
@@ -456,11 +479,353 @@ void DrawWrist(glm::mat4 model)
 	unitSphere->Draw();
 }
 
+
+struct RigidBody
+{
+	glm::vec3 position = glm::vec3(0.0f);
+	glm::vec3 velocity = glm::vec3(0.0f);
+	glm::quat orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+	glm::vec3 angularVelocity = glm::vec3(0.0f);
+	glm::vec3 halfSize = glm::vec3(0.5f);
+	glm::vec3 color = glm::vec3(0.8f);
+	glm::vec3 invInertiaLocal = glm::vec3(1.0f);
+	float mass = 1.0f;
+	float invMass = 1.0f;
+	float restitution = 0.35f;
+	float friction = 0.65f;
+};
+
+const int NUM_RIGID_BODIES = 3;
+RigidBody bodies[NUM_RIGID_BODIES];
+const glm::vec3 GRAVITY(0.0f, -9.8f, 0.0f);
+
+void SetBoxMassAndInertia(RigidBody& b, float mass)
+{
+	b.mass = mass;
+	b.invMass = 1.0f / mass;
+
+	glm::vec3 size = 2.0f * b.halfSize;
+	float ix = (mass / 12.0f) * (size.y * size.y + size.z * size.z);
+	float iy = (mass / 12.0f) * (size.x * size.x + size.z * size.z);
+	float iz = (mass / 12.0f) * (size.x * size.x + size.y * size.y);
+	b.invInertiaLocal = glm::vec3(1.0f / ix, 1.0f / iy, 1.0f / iz);
+}
+
+void ResetRigidBodies()
+{
+	bodies[0].position = glm::vec3(-0.85f, 2.60f, 0.00f);
+	bodies[0].velocity = glm::vec3(1.20f, 0.0f, 0.20f);
+	bodies[0].orientation = glm::angleAxis(glm::radians(18.0f), glm::normalize(glm::vec3(0.3f, 1.0f, 0.2f)));
+	bodies[0].angularVelocity = glm::vec3(1.6f, 0.5f, -0.9f);
+	bodies[0].halfSize = glm::vec3(0.55f, 0.18f, 0.25f);
+	bodies[0].color = glm::vec3(0.95f, 0.35f, 0.25f);
+	bodies[0].restitution = 0.40f;
+	bodies[0].friction = 0.65f;
+	SetBoxMassAndInertia(bodies[0], 1.2f);
+
+	bodies[1].position = glm::vec3(0.15f, 4.10f, 0.05f);
+	bodies[1].velocity = glm::vec3(-0.35f, 0.0f, 0.10f);
+	bodies[1].orientation = glm::angleAxis(glm::radians(-25.0f), glm::normalize(glm::vec3(1.0f, 0.3f, 0.5f)));
+	bodies[1].angularVelocity = glm::vec3(-1.0f, 0.7f, 1.3f);
+	bodies[1].halfSize = glm::vec3(0.22f, 0.62f, 0.22f);
+	bodies[1].color = glm::vec3(0.25f, 0.65f, 0.95f);
+	bodies[1].restitution = 0.30f;
+	bodies[1].friction = 0.70f;
+	SetBoxMassAndInertia(bodies[1], 1.0f);
+
+	bodies[2].position = glm::vec3(0.95f, 5.40f, -0.25f);
+	bodies[2].velocity = glm::vec3(-0.85f, 0.0f, 0.30f);
+	bodies[2].orientation = glm::angleAxis(glm::radians(35.0f), glm::normalize(glm::vec3(0.2f, 0.5f, 1.0f)));
+	bodies[2].angularVelocity = glm::vec3(0.6f, -1.2f, 0.8f);
+	bodies[2].halfSize = glm::vec3(0.36f, 0.25f, 0.70f);
+	bodies[2].color = glm::vec3(0.55f, 0.90f, 0.35f);
+	bodies[2].restitution = 0.35f;
+	bodies[2].friction = 0.60f;
+	SetBoxMassAndInertia(bodies[2], 1.4f);
+}
+
+void InitRigidBodies()
+{
+	ResetRigidBodies();
+}
+
+glm::mat3 InverseInertiaWorld(const RigidBody& b)
+{
+	glm::mat3 R = glm::mat3_cast(b.orientation);
+	glm::mat3 IinvLocal(0.0f);
+	IinvLocal[0][0] = b.invInertiaLocal.x;
+	IinvLocal[1][1] = b.invInertiaLocal.y;
+	IinvLocal[2][2] = b.invInertiaLocal.z;
+	return R * IinvLocal * glm::transpose(R);
+}
+
+std::vector<glm::vec3> GetBoxCorners(const RigidBody& b)
+{
+	std::vector<glm::vec3> corners;
+	corners.reserve(8);
+	glm::mat3 R = glm::mat3_cast(b.orientation);
+	for (int x = -1; x <= 1; x += 2)
+	{
+		for (int y = -1; y <= 1; y += 2)
+		{
+			for (int z = -1; z <= 1; z += 2)
+			{
+				glm::vec3 local = glm::vec3((float)x * b.halfSize.x, (float)y * b.halfSize.y, (float)z * b.halfSize.z);
+				corners.push_back(b.position + R * local);
+			}
+		}
+	}
+	return corners;
+}
+
+void IntegrateRigidBody(RigidBody& b, float h)
+{
+	b.velocity += GRAVITY * h;
+	b.position += b.velocity * h;
+
+	glm::quat spin(0.0f, b.angularVelocity.x, b.angularVelocity.y, b.angularVelocity.z);
+	glm::quat qdot = spin * b.orientation;
+	b.orientation.w += 0.5f * h * qdot.w;
+	b.orientation.x += 0.5f * h * qdot.x;
+	b.orientation.y += 0.5f * h * qdot.y;
+	b.orientation.z += 0.5f * h * qdot.z;
+	b.orientation = glm::normalize(b.orientation);
+
+	// Mild damping keeps the demo stable without hiding collision behavior.
+	b.velocity *= 0.999f;
+	b.angularVelocity *= 0.995f;
+}
+
+void ResolveGroundCollision(RigidBody& b)
+{
+	std::vector<glm::vec3> corners = GetBoxCorners(b);
+	float minY = corners[0].y;
+	for (const glm::vec3& c : corners)
+	{
+		minY = std::min(minY, c.y);
+	}
+
+	if (minY < 0.0f)
+	{
+		// Positional correction
+		b.position.y += -minY + 0.001f;
+	}
+
+	glm::mat3 IinvWorld = InverseInertiaWorld(b);
+	glm::vec3 n(0.0f, 1.0f, 0.0f);
+
+	for (const glm::vec3& c : corners)
+	{
+		if (c.y > 0.02f) continue;
+
+		glm::vec3 r = c - b.position;
+		glm::vec3 pointVelocity = b.velocity + glm::cross(b.angularVelocity, r);
+		float vn = glm::dot(pointVelocity, n);
+
+		if (vn < 0.0f)
+		{
+			glm::vec3 rn = glm::cross(r, n);
+			float denom = b.invMass + glm::dot(n, glm::cross(IinvWorld * rn, r));
+			if (denom > 0.0001f)
+			{
+				float j = -(1.0f + b.restitution) * vn / denom;
+				j /= 4.0f; // several corners may contact at once
+				glm::vec3 impulse = j * n;
+				b.velocity += impulse * b.invMass;
+				b.angularVelocity += IinvWorld * glm::cross(r, impulse);
+
+				// friction impulse.
+				glm::vec3 tangent = pointVelocity - vn * n;
+				float tangentLen = glm::length(tangent);
+				if (tangentLen > 0.0001f)
+				{
+					tangent /= tangentLen;
+					glm::vec3 rt = glm::cross(r, tangent);
+					float denomT = b.invMass + glm::dot(tangent, glm::cross(IinvWorld * rt, r));
+					float jt = -glm::dot(pointVelocity, tangent) / std::max(denomT, 0.0001f);
+					float maxFriction = b.friction * j;
+					jt = glm::clamp(jt, -maxFriction, maxFriction);
+					glm::vec3 frictionImpulse = jt * tangent;
+					b.velocity += frictionImpulse * b.invMass;
+					b.angularVelocity += IinvWorld * glm::cross(r, frictionImpulse);
+				}
+			}
+		}
+	}
+}
+
+void GetAABB(const RigidBody& b, glm::vec3& minP, glm::vec3& maxP)
+{
+	std::vector<glm::vec3> corners = GetBoxCorners(b);
+	minP = corners[0];
+	maxP = corners[0];
+	for (const glm::vec3& c : corners)
+	{
+		minP = glm::min(minP, c);
+		maxP = glm::max(maxP, c);
+	}
+}
+
+void ResolvePairCollision(RigidBody& a, RigidBody& b)
+{
+	glm::vec3 minA, maxA, minB, maxB;
+	GetAABB(a, minA, maxA);
+	GetAABB(b, minB, maxB);
+
+	float overlapX = std::min(maxA.x, maxB.x) - std::max(minA.x, minB.x);
+	float overlapY = std::min(maxA.y, maxB.y) - std::max(minA.y, minB.y);
+	float overlapZ = std::min(maxA.z, maxB.z) - std::max(minA.z, minB.z);
+	if (overlapX <= 0.0f || overlapY <= 0.0f || overlapZ <= 0.0f) return;
+
+	glm::vec3 n(0.0f);
+	float penetration = overlapX;
+	n.x = (a.position.x < b.position.x) ? -1.0f : 1.0f;
+	if (overlapY < penetration)
+	{
+		penetration = overlapY;
+		n = glm::vec3(0.0f, (a.position.y < b.position.y) ? -1.0f : 1.0f, 0.0f);
+	}
+	if (overlapZ < penetration)
+	{
+		penetration = overlapZ;
+		n = glm::vec3(0.0f, 0.0f, (a.position.z < b.position.z) ? -1.0f : 1.0f);
+	}
+
+	float totalInvMass = a.invMass + b.invMass;
+	if (totalInvMass <= 0.0f) return;
+
+	// Positional correction.
+	glm::vec3 correction = (penetration / totalInvMass) * n * 0.55f;
+	a.position += correction * a.invMass;
+	b.position -= correction * b.invMass;
+
+	glm::vec3 relativeVelocity = a.velocity - b.velocity;
+	float relN = glm::dot(relativeVelocity, n);
+	if (relN < 0.0f)
+	{
+		float e = std::min(a.restitution, b.restitution);
+		float j = -(1.0f + e) * relN / totalInvMass;
+		glm::vec3 impulse = j * n;
+		a.velocity += impulse * a.invMass;
+		b.velocity -= impulse * b.invMass;
+
+		a.angularVelocity += 0.08f * glm::cross(n, relativeVelocity);
+		b.angularVelocity -= 0.08f * glm::cross(n, relativeVelocity);
+	}
+}
+
+void UpdateRigidBodies(float dt)
+{
+	if (dt <= 0.0f) return;
+	dt = std::min(dt, 1.0f / 30.0f);
+
+	const int subSteps = 6;
+	float h = dt / (float)subSteps;
+	for (int s = 0; s < subSteps; ++s)
+	{
+		for (int i = 0; i < NUM_RIGID_BODIES; ++i)
+		{
+			IntegrateRigidBody(bodies[i], h);
+			ResolveGroundCollision(bodies[i]);
+		}
+		for (int i = 0; i < NUM_RIGID_BODIES; ++i)
+		{
+			for (int j = i + 1; j < NUM_RIGID_BODIES; ++j)
+			{
+				ResolvePairCollision(bodies[i], bodies[j]);
+			}
+		}
+	}
+}
+
+void DrawRigidBox(const RigidBody& b)
+{
+	glm::mat4 model = glm::translate(glm::mat4(1.0f), b.position);
+	model *= glm::toMat4(b.orientation);
+	model = glm::scale(model, 2.0f * b.halfSize);
+
+	lightingShader->use();
+	lightingShader->setMat4("model", model);
+	lightingShader->setVec3("ObjColor", b.color);
+	lightingShader->setInt("hasTextures", false);
+	unitBox->Draw();
+}
+
+void DrawRigidBodies()
+{
+	for (int i = 0; i < NUM_RIGID_BODIES; ++i)
+	{
+		DrawRigidBox(bodies[i]);
+	}
+}
+
 /////////////////////////////////////////////////////////////////////////
 ///// References https://learnopengl.com/Getting-started/Shaders
 /////		     https://learnopengl.com/Lighting/Basic-Lighting
 /////			 http://www.songho.ca/opengl/gl_cylinder.html
 /////////////////////////////////////////////////////////////////////////
+
+
+Box::Box()
+{
+	float data[] = {
+		// positions          // normals
+		// front (+Z)
+		-0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+		 0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+		 0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+		-0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
+		// back (-Z)
+		 0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+		-0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+		-0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+		 0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
+		 // left (-X)
+		 -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
+		 -0.5f, -0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
+		 -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
+		 -0.5f,  0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
+		 // right (+X)
+		  0.5f, -0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
+		  0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
+		  0.5f,  0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
+		  0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
+		  // top (+Y)
+		  -0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
+		   0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
+		   0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
+		  -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
+		  // bottom (-Y)
+		  -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
+		   0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
+		   0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
+		  -0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f
+	};
+
+	unsigned int indices[] = {
+		0, 1, 2, 0, 2, 3,
+		4, 5, 6, 4, 6, 7,
+		8, 9, 10, 8, 10, 11,
+		12, 13, 14, 12, 14, 15,
+		16, 17, 18, 16, 18, 19,
+		20, 21, 22, 20, 22, 23
+	};
+
+	IndexCount = sizeof(indices) / sizeof(unsigned int);
+
+	glBindVertexArray(VAO);
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(data), data, GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+	GLsizei stride = (3 + 3) * sizeof(float);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
+	glBindVertexArray(0);
+}
 
 Sphere::Sphere(int NumSegs)
 {
@@ -540,7 +905,6 @@ Sphere::Sphere(int NumSegs)
 
 
 // utility function for loading a 2D texture from file
-// ---------------------------------------------------
 unsigned int loadTexture(char const* path)
 {
 	unsigned int textureID;
@@ -562,7 +926,7 @@ unsigned int loadTexture(char const* path)
 		glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
 		glGenerateMipmap(GL_TEXTURE_2D);
 
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, format == GL_RGBA ? GL_CLAMP_TO_EDGE : GL_REPEAT); // for this tutorial: use GL_CLAMP_TO_EDGE to prevent semi-transparent borders. Due to interpolation it takes texels from next repeat 
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, format == GL_RGBA ? GL_CLAMP_TO_EDGE : GL_REPEAT); 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, format == GL_RGBA ? GL_CLAMP_TO_EDGE : GL_REPEAT);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -654,8 +1018,6 @@ Cylinder::Cylinder(float bottomRadius, float topRadius, int NumSegs)
 		}
 	}
 
-	//the starting index for the base/top surface
-	//NOTE: it is used for generating indices later
 	int baseCenterIndex = (int)positions.size();
 	int topCenterIndex = baseCenterIndex + NumSegs + 1; // include center vertex
 
@@ -696,8 +1058,6 @@ Cylinder::Cylinder(float bottomRadius, float topRadius, int NumSegs)
 	}
 
 	//indices for the base surface
-	//NOTE: baseCenterIndex and topCenterIndices are pre-computed during vertex generation
-	//      please see the previous code snippet
 	for (int i = 0, k = baseCenterIndex + 1; i < NumSegs; ++i, ++k)
 	{
 		if (i < NumSegs - 1)
